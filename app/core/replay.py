@@ -99,7 +99,7 @@ class ReplayState:
     students: dict[str, StudentProgress]
 
 
-def _parse_checkin(
+def parse_checkin(
     event: Event, tz_name: str
 ) -> CheckinRecord:
     start = to_utc(datetime.fromisoformat(event.payload["check_in_at"]))
@@ -142,7 +142,7 @@ def replay(
 
     for event in sorted_events:
         if event.event_type == EventType.CHECKIN:
-            record = _parse_checkin(event, timezone_name)
+            record = parse_checkin(event, timezone_name)
             checkins_by_student.setdefault(event.student_id, []).append(record)
             checkin_index[event.event_id] = record
         elif event.event_type == EventType.MENTOR_CONFIRM:

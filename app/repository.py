@@ -12,7 +12,7 @@ from sqlalchemy.orm import Session
 from .core.replay import Event as CoreEvent
 from .core.replay import EventType
 from .models import Event as EventModel
-from .models import Freeze, Plan
+from .models import Freeze, Plan, RuleSet, StageFreeze
 
 
 def get_plan(db: Session, plan_version: str) -> Plan | None:
@@ -142,4 +142,110 @@ def insert_freeze(
     db.commit()
     if inserted is not None:
         return db.get(Freeze, (plan_version, freeze_id))
+    return None
+
+
+def get_rule_set(db: Session, plan_version: str, rule_version: str) -> RuleSet | None:
+    return db.get(RuleSet, (plan_version, rule_version))
+
+
+def list_rule_sets(db: Session, plan_version: str) -> list[RuleSet]:
+    stmt = (
+        select(RuleSet)
+        .where(RuleSet.plan_version == plan_version)
+        .order_by(RuleSet.created_at, RuleSet.rule_version)
+    )
+    return list(db.execute(stmt).scalars().all())
+
+
+def upsert_rule_set(
+    db: Session,
+    *,
+    plan_version: str,
+    rule_version: str,
+    spec: dict[str, Any],
+) -> RuleSet:
+    """执行确定性的业务处理。"""
+    stmt = sqlite_insert(RuleSet).values(
+        plan_version=plan_version,
+        rule_version=rule_version,
+        spec=spec,
+    )
+    stmt = stmt.on_conflict_do_update(
+        index_elements=["plan_version", "rule_version"],
+        set_={"spec": spec},
+    )
+    db.execute(stmt)
+    db.commit()
+    row = db.get(RuleSet, (plan_version, rule_version))
+    assert row is not None
+    return row
+
+
+def set_active_rule_version(
+    db: Session, plan_version: str, rule_version: str | None
+) -> Plan:
+    """执行确定性的业务处理。"""
+    plan = db.get(Plan, plan_version)
+    assert plan is not None
+    plan.active_rule_version = rule_version
+    db.commit()
+    db.refresh(plan)
+    return plan
+
+
+def list_frozen_stage_ids(
+    db: Session, plan_version: str, rule_version: str
+) -> list[str]:
+    stmt = (
+        select(StageFreeze.stage_id)
+        .where(StageFreeze.plan_version == plan_version)
+        .where(StageFreeze.rule_version == rule_version)
+        .order_by(StageFreeze.stage_id)
+    )
+    return list(db.execute(stmt).scalars().all())
+
+
+def get_stage_freeze(
+    db: Session, plan_version: str, rule_version: str, stage_id: str
+) -> StageFreeze | None:
+    return db.get(StageFreeze, (plan_version, rule_version, stage_id))
+
+
+def list_stage_freezes(
+    db: Session, plan_version: str, rule_version: str
+) -> list[StageFreeze]:
+    stmt = (
+        select(StageFreeze)
+        .where(StageFreeze.plan_version == plan_version)
+        .where(StageFreeze.rule_version == rule_version)
+        .order_by(StageFreeze.stage_id)
+    )
+    return list(db.execute(stmt).scalars().all())
+
+
+def insert_stage_freeze(
+    db: Session,
+    *,
+    plan_version: str,
+    rule_version: str,
+    stage_id: str,
+    snapshot: dict[str, Any],
+    event_cutoff_id: str | None,
+) -> StageFreeze | None:
+    """执行确定性的业务处理。"""
+    stmt = sqlite_insert(StageFreeze).values(
+        plan_version=plan_version,
+        rule_version=rule_version,
+        stage_id=stage_id,
+        snapshot=snapshot,
+        event_cutoff_id=event_cutoff_id,
+    )
+    stmt = stmt.on_conflict_do_nothing(
+        index_elements=["plan_version", "rule_version", "stage_id"]
+    ).returning(StageFreeze.plan_version)
+    inserted = db.execute(stmt).scalar_one_or_none()
+    db.commit()
+    if inserted is not None:
+        return db.get(StageFreeze, (plan_version, rule_version, stage_id))
     return None

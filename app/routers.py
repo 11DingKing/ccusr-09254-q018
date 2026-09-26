@@ -8,6 +8,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 
 from . import services
+from .core.stages import RuleError
 from .db import get_db
 from .schemas import (
     DiffOut,
@@ -16,8 +17,13 @@ from .schemas import (
     ImportResult,
     PlanIn,
     PlanOut,
+    RuleSetIn,
+    RuleSetOut,
     SnapshotOut,
+    StageFreezeIn,
+    StageFreezeOut,
     StudentProgressOut,
+    WarningsOut,
 )
 
 router = APIRouter(prefix="/api")
@@ -160,3 +166,131 @@ def get_diff(
         )
     except (services.PlanNotFoundError, services.FreezeNotFoundError) as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.put(
+    "/plans/{plan_version}/rules/{rule_version}",
+    response_model=RuleSetOut,
+    status_code=status.HTTP_201_CREATED,
+)
+def put_rule_set(
+    plan_version: str,
+    rule_version: str,
+    body: RuleSetIn,
+    db: Session = Depends(get_db),
+) -> Any:
+    try:
+        return services.put_rule_set(
+            db,
+            plan_version=plan_version,
+            rule_version=rule_version,
+            stages=[s.model_dump() for s in body.stages],
+        )
+    except services.PlanNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except services.RuleSetFrozenError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except RuleError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@router.get("/plans/{plan_version}/rules", response_model=list[RuleSetOut])
+def list_rule_sets(plan_version: str, db: Session = Depends(get_db)) -> Any:
+    try:
+        return services.list_rule_set_views(db, plan_version)
+    except services.PlanNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.get(
+    "/plans/{plan_version}/rules/{rule_version}",
+    response_model=RuleSetOut,
+)
+def get_rule_set(
+    plan_version: str, rule_version: str, db: Session = Depends(get_db)
+) -> Any:
+    try:
+        return services.get_rule_set_view(db, plan_version, rule_version)
+    except (
+        services.PlanNotFoundError,
+        services.RuleSetNotFoundError,
+    ) as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.post(
+    "/plans/{plan_version}/rules/{rule_version}/activate",
+    response_model=PlanOut,
+)
+def activate_rule_set(
+    plan_version: str, rule_version: str, db: Session = Depends(get_db)
+) -> Any:
+    try:
+        return services.activate_rule_set(db, plan_version, rule_version)
+    except (
+        services.PlanNotFoundError,
+        services.RuleSetNotFoundError,
+    ) as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.get(
+    "/plans/{plan_version}/warnings",
+    response_model=WarningsOut,
+)
+def get_warnings(
+    plan_version: str,
+    stage_id: str | None = None,
+    db: Session = Depends(get_db),
+) -> Any:
+    try:
+        return services.batch_warnings(db, plan_version, stage_id=stage_id)
+    except services.PlanNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.post(
+    "/plans/{plan_version}/stages/{stage_id}/freeze",
+    response_model=StageFreezeOut,
+    status_code=status.HTTP_201_CREATED,
+)
+def post_stage_freeze(
+    plan_version: str,
+    stage_id: str,
+    body: StageFreezeIn,
+    db: Session = Depends(get_db),
+) -> Any:
+    try:
+        snapshot, _ = services.freeze_stage(
+            db, plan_version=plan_version, stage_id=stage_id
+        )
+        return snapshot
+    except services.PlanNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except services.StageNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except services.NoActiveRuleSetError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@router.get(
+    "/plans/{plan_version}/stages/{stage_id}/freeze",
+    response_model=StageFreezeOut,
+)
+def get_stage_freeze(
+    plan_version: str,
+    stage_id: str,
+    rule_version: str | None = None,
+    db: Session = Depends(get_db),
+) -> Any:
+    try:
+        return services.get_stage_freeze_view(
+            db, plan_version, stage_id, rule_version=rule_version
+        )
+    except (
+        services.PlanNotFoundError,
+        services.StageFreezeNotFoundError,
+    ) as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except services.NoActiveRuleSetError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc

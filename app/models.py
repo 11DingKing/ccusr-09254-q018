@@ -31,6 +31,9 @@ class Plan(Base):
     plan_version: Mapped[str] = mapped_column(String(128), primary_key=True)
     iana_timezone: Mapped[str] = mapped_column(String(64), nullable=False)
     required_seconds: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    active_rule_version: Mapped[str | None] = mapped_column(
+        String(128), nullable=True
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, default=_utcnow
     )
@@ -64,6 +67,30 @@ class Freeze(Base):
 
     plan_version: Mapped[str] = mapped_column(String(128), primary_key=True)
     freeze_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    snapshot: Mapped[dict] = mapped_column(JSON, nullable=False)
+    event_cutoff_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=_utcnow, server_default=func.now()
+    )
+
+
+class RuleSet(Base):
+    __tablename__ = "rule_sets"
+
+    plan_version: Mapped[str] = mapped_column(String(128), primary_key=True)
+    rule_version: Mapped[str] = mapped_column(String(128), primary_key=True)
+    spec: Mapped[dict] = mapped_column(JSON, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=_utcnow, server_default=func.now()
+    )
+
+
+class StageFreeze(Base):
+    __tablename__ = "stage_freezes"
+
+    plan_version: Mapped[str] = mapped_column(String(128), primary_key=True)
+    rule_version: Mapped[str] = mapped_column(String(128), primary_key=True)
+    stage_id: Mapped[str] = mapped_column(String(128), primary_key=True)
     snapshot: Mapped[dict] = mapped_column(JSON, nullable=False)
     event_cutoff_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
