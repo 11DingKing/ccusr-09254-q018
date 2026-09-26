@@ -17,7 +17,12 @@ from .schemas import (
     PlanIn,
     PlanOut,
     SnapshotOut,
+    StageFreezeOut,
+    StageRuleOut,
+    StageRulesIn,
+    StageWarningsOut,
     StudentProgressOut,
+    StudentStageProgressOut,
 )
 
 router = APIRouter(prefix="/api")
@@ -160,3 +165,110 @@ def get_diff(
         )
     except (services.PlanNotFoundError, services.FreezeNotFoundError) as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+# ---------------------------------------------------------------------------
+# 分阶段培养：规则配置 / 学生查询 / 批量预警 / 阶段冻结
+# ---------------------------------------------------------------------------
+
+
+@router.put(
+    "/plans/{plan_version}/stage-rules",
+    response_model=StageRuleOut,
+    status_code=status.HTTP_201_CREATED,
+)
+def put_stage_rules(
+    plan_version: str, body: StageRulesIn, db: Session = Depends(get_db)
+) -> Any:
+    """发布一个不可变的新阶段规则版本（版本号自动递增）。"""
+    try:
+        return services.publish_stage_rules(
+            db,
+            plan_version=plan_version,
+            stages=[s.model_dump(mode="json") for s in body.stages],
+        )
+    except services.PlanNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except services.StageRuleError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@router.get("/plans/{plan_version}/stage-rules", response_model=list[StageRuleOut])
+def list_stage_rules(plan_version: str, db: Session = Depends(get_db)) -> Any:
+    try:
+        return services.list_stage_rule_versions_plain(db, plan_version)
+    except services.PlanNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.get(
+    "/plans/{plan_version}/students/{student_id}/stage-progress",
+    response_model=StudentStageProgressOut,
+)
+def get_student_stage_progress(
+    plan_version: str,
+    student_id: str,
+    rules_version: int | None = None,
+    db: Session = Depends(get_db),
+) -> Any:
+    try:
+        result = services.student_stage_progress(
+            db, plan_version, student_id, rules_version=rules_version
+        )
+    except (
+        services.PlanNotFoundError,
+        services.StageRulesNotFoundError,
+    ) as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    if result is None:
+        raise HTTPException(status_code=404, detail="student not found")
+    return result
+
+
+@router.get(
+    "/plans/{plan_version}/stage-warnings",
+    response_model=StageWarningsOut,
+)
+def get_stage_warnings(
+    plan_version: str,
+    stage_id: str | None = None,
+    rules_version: int | None = None,
+    db: Session = Depends(get_db),
+) -> Any:
+    try:
+        return services.stage_warnings(
+            db, plan_version, stage_id=stage_id, rules_version=rules_version
+        )
+    except (
+        services.PlanNotFoundError,
+        services.StageRulesNotFoundError,
+        services.StageNotFoundError,
+    ) as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.post(
+    "/plans/{plan_version}/stage-freezes/{stage_id}",
+    response_model=StageFreezeOut,
+    status_code=status.HTTP_201_CREATED,
+)
+def post_stage_freeze(
+    plan_version: str,
+    stage_id: str,
+    db: Session = Depends(get_db),
+) -> Any:
+    """顺序关账某阶段；已关账时幂等返回原凭证（created=false）。"""
+    try:
+        result, created = services.freeze_stage(
+            db, plan_version=plan_version, stage_id=stage_id
+        )
+    except (
+        services.PlanNotFoundError,
+        services.StageRulesNotFoundError,
+        services.StageNotFoundError,
+    ) as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except services.StageOrderError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    result["created"] = created
+    return result

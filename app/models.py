@@ -69,3 +69,36 @@ class Freeze(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, default=_utcnow, server_default=func.now()
     )
+
+
+class StageRuleVersion(Base):
+    """阶段规则的不可变版本：每次配置发布追加一行，重放按版本引用。"""
+
+    __tablename__ = "stage_rule_versions"
+
+    plan_version: Mapped[str] = mapped_column(String(128), primary_key=True)
+    rules_version: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=False)
+    iana_timezone: Mapped[str] = mapped_column(String(64), nullable=False)
+    stages: Mapped[list] = mapped_column(JSON, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=_utcnow, server_default=func.now()
+    )
+
+
+class StageFreeze(Base):
+    """阶段关账凭证：一个规则版本下的一个阶段顺序关账一次，快照不可变。"""
+
+    __tablename__ = "stage_freezes"
+
+    plan_version: Mapped[str] = mapped_column(String(128), primary_key=True)
+    rules_version: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=False)
+    stage_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    event_cutoff_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    snapshot: Mapped[dict] = mapped_column(JSON, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=_utcnow, server_default=func.now()
+    )
+
+    __table_args__ = (
+        Index("ix_stage_freezes_plan", "plan_version"),
+    )

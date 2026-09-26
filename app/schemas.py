@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import date, datetime
 from typing import Any, Literal
 
 from pydantic import BaseModel, Field, field_validator, model_validator
@@ -138,3 +138,147 @@ class DiffOut(BaseModel):
     new_event_cutoff_id: str | None
     student_changes: list[dict[str, Any]]
     students_affected: int
+
+
+# ---------------------------------------------------------------------------
+# 分阶段培养规则
+# ---------------------------------------------------------------------------
+
+
+class CategoryRequirementIn(BaseModel):
+    category: str = Field(..., min_length=1, max_length=64)
+    required_seconds: int = Field(..., ge=0)
+
+
+class CompensationIn(BaseModel):
+    from_category: str = Field(..., min_length=1, max_length=64)
+    to_category: str = Field(..., min_length=1, max_length=64)
+    rate_milli: int = Field(..., gt=0, le=1_000_000)
+
+    @model_validator(mode="after")
+    def _check_categories(self) -> "CompensationIn":
+        if self.from_category == self.to_category:
+            raise ValueError("compensation must link different categories")
+        return self
+
+
+class StageRuleIn(BaseModel):
+    stage_id: str = Field(..., min_length=1, max_length=128)
+    end_date: date
+    required_seconds: int = Field(0, ge=0)
+    carryover_cap_seconds: int | None = Field(None, ge=0)
+    category_requirements: list[CategoryRequirementIn] = Field(default_factory=list)
+    compensation: list[CompensationIn] = Field(default_factory=list)
+
+
+class StageRulesIn(BaseModel):
+    stages: list[StageRuleIn] = Field(..., min_length=1)
+
+    @model_validator(mode="after")
+    def _check_ordering(self) -> "StageRulesIn":
+        seen: set[str] = set()
+        prev: date | None = None
+        for stage in self.stages:
+            if stage.stage_id in seen:
+                raise ValueError(f"duplicate stage_id '{stage.stage_id}'")
+            seen.add(stage.stage_id)
+            if prev is not None and stage.end_date <= prev:
+                raise ValueError(
+                    f"stage '{stage.stage_id}' end_date must be after {prev}"
+                )
+            prev = stage.end_date
+        return self
+
+
+class StageRuleOut(BaseModel):
+    plan_version: str
+    rules_version: int
+    iana_timezone: str
+    stages: list[dict[str, Any]]
+
+
+class CategoryGapOut(BaseModel):
+    category: str
+    required_seconds: int
+    earned_seconds: int
+    compensated_seconds: int
+    gap_seconds: int
+    met: bool
+
+
+class CompensationOut(BaseModel):
+    from_category: str
+    to_category: str
+    rate_milli: int
+    offered_seconds: int
+    applied_seconds: int
+
+
+class CarryableSourceOut(BaseModel):
+    category: str
+    available_seconds: int
+
+
+class StageProgressOut(BaseModel):
+    stage_id: str
+    end_date: str
+    required_seconds: int
+    carryover_cap_seconds: int | None
+    earned_seconds: int
+    pending_seconds: int
+    adjustment_seconds: int
+    carry_in_seconds: int
+    carry_in_source_stage: str | None
+    total_gap_seconds: int
+    category_gaps: list[CategoryGapOut]
+    compensation_applied: list[CompensationOut]
+    surplus_seconds: int
+    carry_out_seconds: int
+    spillover_lost_seconds: int
+    carryable_sources: list[CarryableSourceOut]
+    frozen: bool
+    met: bool
+
+
+class StudentStageProgressOut(BaseModel):
+    plan_version: str
+    rules_version: int
+    timezone: str
+    student_id: str
+    meets_all: bool
+    stages: list[StageProgressOut]
+
+
+class StageWarningOut(BaseModel):
+    student_id: str
+    stage_id: str
+    total_gap_seconds: int
+    category_gaps: list[CategoryGapOut]
+    carry_in_seconds: int
+    carry_in_source_stage: str | None
+    carry_out_seconds: int
+    pending_seconds: int
+    carryable_sources: list[CarryableSourceOut]
+
+
+class StageWarningsOut(BaseModel):
+    plan_version: str
+    rules_version: int
+    stage_id: str | None
+    warnings: list[StageWarningOut]
+    students_below: int
+
+
+class StageFreezeStudentOut(BaseModel):
+    student_id: str
+    stage: StageProgressOut
+
+
+class StageFreezeOut(BaseModel):
+    plan_version: str
+    stage_id: str
+    rules_version: int
+    event_cutoff_id: str | None
+    created: bool
+    created_at: str | None = None
+    students: list[StageFreezeStudentOut]

@@ -5,14 +5,14 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import JSON, and_, exists, literal, select
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.orm import Session
 
 from .core.replay import Event as CoreEvent
 from .core.replay import EventType
 from .models import Event as EventModel
-from .models import Freeze, Plan
+from .models import Freeze, Plan, StageFreeze, StageRuleVersion
 
 
 def get_plan(db: Session, plan_version: str) -> Plan | None:
@@ -142,4 +142,139 @@ def insert_freeze(
     db.commit()
     if inserted is not None:
         return db.get(Freeze, (plan_version, freeze_id))
+    return None
+
+
+# ---------------------------------------------------------------------------
+# 阶段规则版本
+# ---------------------------------------------------------------------------
+
+
+def list_stage_rule_versions(db: Session, plan_version: str) -> list[StageRuleVersion]:
+    stmt = (
+        select(StageRuleVersion)
+        .where(StageRuleVersion.plan_version == plan_version)
+        .order_by(StageRuleVersion.rules_version)
+    )
+    return list(db.execute(stmt).scalars().all())
+
+
+def get_stage_rule_version(
+    db: Session, plan_version: str, rules_version: int
+) -> StageRuleVersion | None:
+    return db.get(StageRuleVersion, (plan_version, rules_version))
+
+
+def latest_stage_rule_version(
+    db: Session, plan_version: str
+) -> StageRuleVersion | None:
+    stmt = (
+        select(StageRuleVersion)
+        .where(StageRuleVersion.plan_version == plan_version)
+        .order_by(StageRuleVersion.rules_version.desc())
+        .limit(1)
+    )
+    return db.execute(stmt).scalar_one_or_none()
+
+
+def insert_stage_rule_version(
+    db: Session,
+    *,
+    plan_version: str,
+    rules_version: int,
+    iana_timezone: str,
+    stages: list[dict[str, Any]],
+) -> StageRuleVersion | None:
+    """追加不可变规则版本；版本号冲突时返回 None（并发发布决胜）。"""
+    stmt = sqlite_insert(StageRuleVersion).values(
+        plan_version=plan_version,
+        rules_version=rules_version,
+        iana_timezone=iana_timezone,
+        stages=stages,
+    )
+    stmt = stmt.on_conflict_do_nothing(
+        index_elements=["plan_version", "rules_version"]
+    ).returning(StageRuleVersion.rules_version)
+    inserted = db.execute(stmt).scalar_one_or_none()
+    db.commit()
+    if inserted is not None:
+        return db.get(StageRuleVersion, (plan_version, rules_version))
+    return None
+
+
+# ---------------------------------------------------------------------------
+# 阶段关账
+# ---------------------------------------------------------------------------
+
+
+def list_stage_freezes(db: Session, plan_version: str) -> list[StageFreeze]:
+    stmt = (
+        select(StageFreeze)
+        .where(StageFreeze.plan_version == plan_version)
+        .order_by(StageFreeze.stage_id)
+    )
+    return list(db.execute(stmt).scalars().all())
+
+
+def get_stage_freeze(
+    db: Session, plan_version: str, rules_version: int, stage_id: str
+) -> StageFreeze | None:
+    return db.get(StageFreeze, (plan_version, rules_version, stage_id))
+
+
+def insert_stage_freeze(
+    db: Session,
+    *,
+    plan_version: str,
+    stage_id: str,
+    rules_version: int,
+    snapshot: dict[str, Any],
+    event_cutoff_id: str | None,
+    required_predecessors: list[str] | None = None,
+) -> StageFreeze | None:
+    """插入关账凭证。
+
+    使用 ``INSERT ... SELECT ... WHERE`` 在同一条语句（SQLite 写锁）内原子
+    校验“全部前置阶段已关账、且本阶段尚未关账”，从而杜绝 ST1/ST2 并发
+    关账时后序阶段穿透顺序边界。任一条件不满足或并发落败时返回 None。
+    """
+    guard = literal(1)
+    for predecessor in required_predecessors or []:
+        pred_exists = (
+            select(StageFreeze.plan_version)
+            .where(StageFreeze.plan_version == plan_version)
+            .where(StageFreeze.rules_version == rules_version)
+            .where(StageFreeze.stage_id == predecessor)
+            .limit(1)
+        )
+        guard = and_(guard, exists(pred_exists))
+    self_exists = (
+        select(StageFreeze.plan_version)
+        .where(StageFreeze.plan_version == plan_version)
+        .where(StageFreeze.rules_version == rules_version)
+        .where(StageFreeze.stage_id == stage_id)
+        .limit(1)
+    )
+    guard = and_(guard, ~exists(self_exists))
+
+    base = sqlite_insert(StageFreeze)
+    guarded_select = select(
+        literal(plan_version),
+        literal(stage_id),
+        literal(rules_version),
+        literal(event_cutoff_id),
+        literal(snapshot, type_=JSON),
+    ).where(guard)
+    stmt = base.from_select(
+        ["plan_version", "stage_id", "rules_version", "event_cutoff_id", "snapshot"],
+        guarded_select,
+    )
+    # 唯一键并发冲突时也视为落败。
+    stmt = stmt.on_conflict_do_nothing(
+        index_elements=["plan_version", "rules_version", "stage_id"]
+    ).returning(StageFreeze.stage_id)
+    inserted = db.execute(stmt).scalar_one_or_none()
+    db.commit()
+    if inserted is not None:
+        return db.get(StageFreeze, (plan_version, rules_version, stage_id))
     return None
